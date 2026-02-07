@@ -43,7 +43,7 @@ STOP_WORDS = set([
     "you've", 'your', 'yours', 'yourself', 'yourselves'
 ])
 
-#test
+
 def scraper(url, resp):
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
@@ -217,8 +217,8 @@ def is_valid(url):
         lower_path = parsed.path.lower()
         lower_query = parsed.query.lower()
 
-        # Block date-based calendar/event URLs (e.g., /events/2024/02/)
-        if re.search(r'/(calendar|events?)/\d{4}/\d{2}', lower_path):
+        # Block date-based calendar/event URLs (e.g., /events/2024-06-02, /events/week/2025-06-01, /events/month/2025-05)
+        if re.search(r'/(calendar|events?)/(week|month|day|\d{4})', lower_path):
             return False
 
         # Block event tag/category/list pages (e.g., /events/tag/talk/list/)
@@ -239,6 +239,23 @@ def is_valid(url):
 
         # Avoid URLs with too many path segments (potential trap)
         if len(parsed.path.split('/')) > 15:
+            return False
+
+        # Block wiki traps (DokuWiki, MediaWiki revision/diff/history pages)
+        # DokuWiki: Block ALL action URLs (do=anything) to avoid edit/export/login/diff/revision traps
+        if 'doku.php' in lower_path:
+            # Block any ?do= parameter (edit, export, diff, login, etc.) - only allow normal page views
+            if 'do=' in lower_query or 'rev=' in lower_query or 'rev2' in lower_query or 'sectok=' in lower_query:
+                return False
+
+        # MediaWiki: index.php?action=/Special: pages with oldid/diff parameters
+        if ('index.php' in lower_path or '/wiki/' in lower_path) and lower_query:
+            mw_actions = ['action=', 'oldid=', 'diff=', 'curid=', 'printable=']
+            if any(action in lower_query for action in mw_actions):
+                return False
+
+        # Block wiki Special: namespace pages (user lists, recent changes, etc.)
+        if re.search(r'/(special|especial):', lower_path):
             return False
 
         # Block common GitLab / repository endpoints to avoid crawl traps
