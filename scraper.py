@@ -160,7 +160,7 @@ def extract_next_links(url, resp):
         shingles = scramble(words)
         for prev in seen_shingles:
             similarity = similarity_score(shingles, prev)
-            if similarity >= 0.7:  # similarity threshhold is .9
+            if similarity >= 0.84:  # similarity threshhold is .9
                 print(f"[NEAR DUPLICATE] Skipping page: {url} (similarity={similarity:.2f})")
                 return links
         seen_shingles.append(shingles)
@@ -293,6 +293,10 @@ def is_valid(url):
             # Block any ?do= parameter (edit, export, diff, login, etc.) - only allow normal page views
             if 'do=' in lower_query or 'rev=' in lower_query or 'rev2' in lower_query or 'sectok=' in lower_query:
                 return False
+
+        # grape.ics.uci.edu
+        if 'grape.ics.uci.edu' in netloc and '/wiki/' in lower_path:
+            return False
 
         # MediaWiki: index.php?action=/Special: pages with oldid/diff parameters
         if ('index.php' in lower_path or '/wiki/' in lower_path) and lower_query:
