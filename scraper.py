@@ -160,7 +160,7 @@ def extract_next_links(url, resp):
         shingles = scramble(words)
         for prev in seen_shingles:
             similarity = similarity_score(shingles, prev)
-            if similarity >= 0.9:  # similarity threshhold is .9
+            if similarity >= 0.7:  # similarity threshhold is .9
                 print(f"[NEAR DUPLICATE] Skipping page: {url} (similarity={similarity:.2f})")
                 return links
         seen_shingles.append(shingles)
