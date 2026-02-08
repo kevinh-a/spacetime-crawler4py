@@ -160,7 +160,7 @@ def extract_next_links(url, resp):
         shingles = scramble(words)
         for prev in seen_shingles:
             similarity = similarity_score(shingles, prev)
-            if similarity >= 0.84:  # similarity threshhold is .9
+            if similarity >= 0.9:  # similarity threshhold is .9
                 print(f"[NEAR DUPLICATE] Skipping page: {url} (similarity={similarity:.2f})")
                 return links
         seen_shingles.append(shingles)
@@ -247,6 +247,11 @@ def is_valid(url):
         if not is_allowed:
             return False
 
+        # Block specific domains/paths
+        # Avoid grape.ics.uci.edu wiki
+        if 'grape.ics.uci.edu' in netloc and '/wiki/' in parsed.path.lower():
+            return False
+
         # Check for file extensions to avoid
         if re.match(
                 r".*\.(css|js|bmp|gif|jpe?g|ico"
@@ -262,6 +267,23 @@ def is_valid(url):
         # Avoid calendar/event traps (common infinite trap)
         lower_path = parsed.path.lower()
         lower_query = parsed.query.lower()
+
+        # Block any URLs with ?redirect_to parameter
+        if 'redirect_to' in lower_query:
+            return False
+
+        # Avoid wics.ics.uci.edu URLs with ?share in query params
+        if 'wics.ics.uci.edu' in netloc and 'share' in lower_query:
+            return False
+
+        # Avoid ngs.ics.uci.edu URLs with specific paths
+        if 'ngs.ics.uci.edu' in netloc:
+            if '/category' in lower_path or '/author' in lower_path or '/tag' in lower_path:
+                return False
+
+        # Block all event and calendar URLs entirely (they create infinite pagination traps)
+        if re.search(r'/(calendar|events?)(/|$)', lower_path):
+            return False
 
         # Block date-based calendar/event URLs (e.g., /events/2024-06-02, /events/week/2025-06-01, /events/month/2025-05)
         if re.search(r'/(calendar|events?)/(week|month|day|\d{4})', lower_path):
@@ -293,10 +315,6 @@ def is_valid(url):
             # Block any ?do= parameter (edit, export, diff, login, etc.) - only allow normal page views
             if 'do=' in lower_query or 'rev=' in lower_query or 'rev2' in lower_query or 'sectok=' in lower_query:
                 return False
-
-        # grape.ics.uci.edu
-        if 'grape.ics.uci.edu' in netloc and '/wiki/' in lower_path:
-            return False
 
         # MediaWiki: index.php?action=/Special: pages with oldid/diff parameters
         if ('index.php' in lower_path or '/wiki/' in lower_path) and lower_query:
@@ -336,3 +354,4 @@ def is_valid(url):
     except TypeError:
         print("TypeError for ", parsed)
         raise
+
