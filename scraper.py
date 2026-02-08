@@ -3,17 +3,12 @@ from urllib.parse import urlparse, urljoin, urldefrag
 from bs4 import BeautifulSoup
 import json
 import os
-import hashlib
 from collections import defaultdict
+from threading import Lock
 
 # Analytics data storage
 analytics_file = "analytics_data.json"
-
-# Seen exact hashesh storage
-seen_exact_hashes = set()
-
-# Global shingle storage
-seen_shingles = []
+analytics_lock = Lock()
 
 # Load or initialize analytics data
 if os.path.exists(analytics_file):
@@ -51,27 +46,6 @@ STOP_WORDS = set([
 ])
 
 
-def exact_fingerprint(text):
-    return hashlib.sha256(text.encode('utf-8')).hexdigest()
-
-
-def scramble(words, k=5):
-    return set(
-        tuple(words[i:i + k])
-        for i in range(len(words) - k + 1)
-    )
-
-
-def similarity_score(a, b):
-    return len(a & b) / len(a | b) if a and b else 0
-
-
-def text_normalizer(text):
-    text = text.lower()
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-
 def scraper(url, resp):
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
@@ -89,7 +63,6 @@ def extract_next_links(url, resp):
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
 
     links = []
-    global seen_exact_hashes
 
     # Check if response is valid
     if resp.status != 200:
@@ -137,71 +110,55 @@ def extract_next_links(url, resp):
         words = re.findall(r'\b[a-z]+\b', text.lower())
 
         # Check for low information content
-        # If page has fewer than 100 words, it's likely low value (this includes examples like: log in screens)
+        # If page has fewer than 100 words, it's likely low value
         if len(words) < 100:
             return links
 
         # Check for repetitive content (potential trap)
-        # If more than 80% of words are the same, it's likely a trap (skips calendars, spam pages, etc.)
+        # If more than 80% of words are the same, it's likely a trap
         if len(words) > 0:
             unique_words = len(set(words))
             if unique_words / len(words) < 0.2:
                 return links
 
-        # Checking for exact duplicate page
-        page_hash = exact_fingerprint(text_normalizer(text))
-        if page_hash in seen_exact_hashes:
-            print(f"[DUPLICATE] Skipping duplicate page: {url}")
-            return links
-        else:
-            seen_exact_hashes.add(page_hash)
-
-        # Checking for near-duplicate page
-        shingles = scramble(words)
-        for prev in seen_shingles:
-            similarity = similarity_score(shingles, prev)
-            if similarity >= 0.9:  # similarity threshhold is .9
-                print(f"[NEAR DUPLICATE] Skipping page: {url} (similarity={similarity:.2f})")
-                return links
-        seen_shingles.append(shingles)
-
         # Update analytics
         defragged_url, _ = urldefrag(url)
 
-        # Load current analytics
-        if os.path.exists(analytics_file):
-            with open(analytics_file, 'r') as f:
-                analytics_data = json.load(f)
-        else:
-            analytics_data = {
-                'unique_urls': [],
-                'longest_page': {'url': '', 'word_count': 0},
-                'word_freq': {},
-                'subdomains': {}
-            }
+        with analytics_lock:
+            # Load current analytics
+            if os.path.exists(analytics_file):
+                with open(analytics_file, 'r') as f:
+                    analytics_data = json.load(f)
+            else:
+                analytics_data = {
+                    'unique_urls': [],
+                    'longest_page': {'url': '', 'word_count': 0},
+                    'word_freq': {},
+                    'subdomains': {}
+                }
 
-        # Add unique URL
-        if defragged_url not in analytics_data['unique_urls']:
-            analytics_data['unique_urls'].append(defragged_url)
+            # Add unique URL
+            if defragged_url not in analytics_data['unique_urls']:
+                analytics_data['unique_urls'].append(defragged_url)
 
-        # Update longest page
-        word_count = len(words)
-        if word_count > analytics_data['longest_page']['word_count']:
-            analytics_data['longest_page'] = {'url': defragged_url, 'word_count': word_count}
+            # Update longest page
+            word_count = len(words)
+            if word_count > analytics_data['longest_page']['word_count']:
+                analytics_data['longest_page'] = {'url': defragged_url, 'word_count': word_count}
 
-        # Update word frequency (excluding stop words)
-        for word in words:
-            if word not in STOP_WORDS and len(word) > 2:  # Also ignore very short words
-                analytics_data['word_freq'][word] = analytics_data['word_freq'].get(word, 0) + 1
+            # Update word frequency (excluding stop words)
+            for word in words:
+                if word not in STOP_WORDS and len(word) > 2:  # Also ignore very short words
+                    analytics_data['word_freq'][word] = analytics_data['word_freq'].get(word, 0) + 1
 
-        # Update subdomain count
-        parsed = urlparse(defragged_url)
-        if parsed.netloc.endswith('.uci.edu'):
-            analytics_data['subdomains'][parsed.netloc] = analytics_data['subdomains'].get(parsed.netloc, 0) + 1
+            # Update subdomain count
+            parsed = urlparse(defragged_url)
+            if parsed.netloc.endswith('.uci.edu'):
+                analytics_data['subdomains'][parsed.netloc] = analytics_data['subdomains'].get(parsed.netloc, 0) + 1
 
-        # Save analytics
-        with open(analytics_file, 'w') as f:
-            json.dump(analytics_data, f)
+            # Save analytics
+            with open(analytics_file, 'w') as f:
+                json.dump(analytics_data, f)
 
         # Extract all links
         for link in soup.find_all('a', href=True):
