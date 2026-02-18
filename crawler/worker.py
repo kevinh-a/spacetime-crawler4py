@@ -1,4 +1,4 @@
-from threading import Thread, RLock
+from threading import Thread
 
 from inspect import getsource
 from utils.download import download
@@ -30,8 +30,7 @@ class Worker(Thread):
                 self.logger.info(
                     f"Downloaded {tbd_url}, status <{resp.status}>, "
                     f"using cache {self.config.cache_server}.")
-                with RLock():
-                    scraped_urls = scraper.scraper(tbd_url, resp)
+                scraped_urls = scraper.scraper(tbd_url, resp)
                 for scraped_url in scraped_urls:
                     self.frontier.add_url(scraped_url)
             except Exception as e:

@@ -21,7 +21,6 @@ class Frontier(object):
         self.in_progress = 0
 
         if not os.path.exists(self.config.save_file) and not restart:
-            # Save file does not exist, but request to load save.
             self.logger.info(
                 f"Did not find save file {self.config.save_file}, "
                 f"starting from seed.")
@@ -112,7 +111,6 @@ class Frontier(object):
         urlhash = get_urlhash(url)
         with self.cv:
             if urlhash not in self.save:
-                # This should not happen.
                 self.logger.error(
                     f"Completed url {url}, but have not seen it before.")
             else:

@@ -3,19 +3,12 @@ from urllib.parse import urlparse, urljoin, urldefrag
 from bs4 import BeautifulSoup
 import json
 import os
-import hashlib
 from collections import defaultdict
+from threading import Lock
 
-# Analytics data storage
 analytics_file = "analytics_data.json"
+analytics_lock = Lock()
 
-# Seen exact hashesh storage
-seen_exact_hashes = set()
-
-# Global shingle storage
-seen_shingles = []
-
-# Load or initialize analytics data
 if os.path.exists(analytics_file):
     with open(analytics_file, 'r') as f:
         analytics_data = json.load(f)
@@ -26,12 +19,10 @@ else:
         'word_freq': defaultdict(int),
         'subdomains': defaultdict(int)
     }
-    # Convert defaultdict to dict for JSON serialization
     analytics_data['word_freq'] = dict(analytics_data['word_freq'])
     analytics_data['subdomains'] = dict(analytics_data['subdomains'])
     analytics_data['unique_urls'] = list(analytics_data['unique_urls'])
 
-# Load stop words
 STOP_WORDS = set([
     'a', 'about', 'above', 'after', 'again', 'against', 'all', 'am', 'an', 'and', 'any', 'are', "aren't",
     'as', 'at', 'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but', 'by',
@@ -51,27 +42,6 @@ STOP_WORDS = set([
 ])
 
 
-def exact_fingerprint(text):
-    return hashlib.sha256(text.encode('utf-8')).hexdigest()
-
-
-def scramble(words, k=5):
-    return set(
-        tuple(words[i:i + k])
-        for i in range(len(words) - k + 1)
-    )
-
-
-def similarity_score(a, b):
-    return len(a & b) / len(a | b) if a and b else 0
-
-
-def text_normalizer(text):
-    text = text.lower()
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-
 def scraper(url, resp):
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
@@ -89,126 +59,84 @@ def extract_next_links(url, resp):
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
 
     links = []
-    global seen_exact_hashes
 
-    # Check if response is valid
     if resp.status != 200:
         return links
 
-    # Check if response has content
     if not resp.raw_response or not resp.raw_response.content:
         return links
 
     try:
-        # Get content
         content = resp.raw_response.content
 
-        # Check for very large files (>10MB) - likely low information value
+        # Likely low information value if they have very large files (>10MB)
         if len(content) > 10 * 1024 * 1024:
             return links
 
-        # Parse HTML - handle encoding errors gracefully
         try:
-            # Use html.parser instead of lxml for better encoding tolerance
-            # Or decode with error handling first
             if isinstance(content, bytes):
-                # Try to decode with UTF-8, replace bad bytes if needed
                 try:
                     content_str = content.decode('utf-8')
                 except UnicodeDecodeError:
-                    # Fall back to latin-1 or replace errors
                     content_str = content.decode('utf-8', errors='replace')
                 soup = BeautifulSoup(content_str, 'html.parser')
             else:
                 soup = BeautifulSoup(content, 'html.parser')
         except Exception as e:
-            # If parsing fails completely, skip this page
             print(f"Parsing error for {url}: {e}")
             return links
 
-        # Extract text for analytics
-        # Remove script and style elements
         for script in soup(["script", "style"]):
             script.decompose()
 
         text = soup.get_text()
 
-        # Get words (alphanumeric sequences)
         words = re.findall(r'\b[a-z]+\b', text.lower())
 
-        # Check for low information content
-        # If page has fewer than 100 words, it's likely low value (this includes examples like: log in screens)
         if len(words) < 100:
             return links
 
-        # Check for repetitive content (potential trap)
-        # If more than 80% of words are the same, it's likely a trap (skips calendars, spam pages, etc.)
         if len(words) > 0:
             unique_words = len(set(words))
             if unique_words / len(words) < 0.2:
                 return links
 
-        # Checking for exact duplicate page
-        page_hash = exact_fingerprint(text_normalizer(text))
-        if page_hash in seen_exact_hashes:
-            print(f"[DUPLICATE] Skipping duplicate page: {url}")
-            return links
-        else:
-            seen_exact_hashes.add(page_hash)
-
-        # Checking for near-duplicate page
-        shingles = scramble(words)
-        for prev in seen_shingles:
-            similarity = similarity_score(shingles, prev)
-            if similarity >= 0.9:  # similarity threshhold is .9
-                print(f"[NEAR DUPLICATE] Skipping page: {url} (similarity={similarity:.2f})")
-                return links
-        seen_shingles.append(shingles)
-
-        # Update analytics
         defragged_url, _ = urldefrag(url)
 
-        # Load current analytics
-        if os.path.exists(analytics_file):
-            with open(analytics_file, 'r') as f:
-                analytics_data = json.load(f)
-        else:
-            analytics_data = {
-                'unique_urls': [],
-                'longest_page': {'url': '', 'word_count': 0},
-                'word_freq': {},
-                'subdomains': {}
-            }
+        with analytics_lock:
+            # Fix to stop corrupting analytics file with multithreading
+            if os.path.exists(analytics_file):
+                with open(analytics_file, 'r') as f:
+                    analytics_data = json.load(f)
+            else:
+                analytics_data = {
+                    'unique_urls': [],
+                    'longest_page': {'url': '', 'word_count': 0},
+                    'word_freq': {},
+                    'subdomains': {}
+                }
 
-        # Add unique URL
-        if defragged_url not in analytics_data['unique_urls']:
-            analytics_data['unique_urls'].append(defragged_url)
+            if defragged_url not in analytics_data['unique_urls']:
+                analytics_data['unique_urls'].append(defragged_url)
 
-        # Update longest page
-        word_count = len(words)
-        if word_count > analytics_data['longest_page']['word_count']:
-            analytics_data['longest_page'] = {'url': defragged_url, 'word_count': word_count}
+            word_count = len(words)
+            if word_count > analytics_data['longest_page']['word_count']:
+                analytics_data['longest_page'] = {'url': defragged_url, 'word_count': word_count}
 
-        # Update word frequency (excluding stop words)
-        for word in words:
-            if word not in STOP_WORDS and len(word) > 2:  # Also ignore very short words
-                analytics_data['word_freq'][word] = analytics_data['word_freq'].get(word, 0) + 1
+            for word in words:
+                if word not in STOP_WORDS and len(word) > 2:  # Also ignore very short words
+                    analytics_data['word_freq'][word] = analytics_data['word_freq'].get(word, 0) + 1
 
-        # Update subdomain count
-        parsed = urlparse(defragged_url)
-        if parsed.netloc.endswith('.uci.edu'):
-            analytics_data['subdomains'][parsed.netloc] = analytics_data['subdomains'].get(parsed.netloc, 0) + 1
+            parsed = urlparse(defragged_url)
+            if parsed.netloc.endswith('.uci.edu'):
+                analytics_data['subdomains'][parsed.netloc] = analytics_data['subdomains'].get(parsed.netloc, 0) + 1
 
-        # Save analytics
-        with open(analytics_file, 'w') as f:
-            json.dump(analytics_data, f)
+            with open(analytics_file, 'w') as f:
+                json.dump(analytics_data, f)
 
-        # Extract all links
         for link in soup.find_all('a', href=True):
             href = link['href']
-            # Convert relative URLs to absolute
             absolute_url = urljoin(url, href)
-            # Defragment URL
             defragged_link, _ = urldefrag(absolute_url)
             links.append(defragged_link)
 
@@ -227,7 +155,6 @@ def is_valid(url):
         if parsed.scheme not in set(["http", "https"]):
             return False
 
-        # Check if URL is in allowed domains
         allowed_domains = [
             '.ics.uci.edu',
             '.cs.uci.edu',
@@ -247,12 +174,13 @@ def is_valid(url):
         if not is_allowed:
             return False
 
-        # Block specific domains/paths
-        # Avoid grape.ics.uci.edu wiki
+        # Block specific domains/paths below
+
+        # Avoid grape.ics.uci.edu wiki due to huge revision histories
         if 'grape.ics.uci.edu' in netloc and '/wiki/' in parsed.path.lower():
             return False
 
-        # Check for file extensions to avoid
+        # File extensions to avoid
         if re.match(
                 r".*\.(css|js|bmp|gif|jpe?g|ico"
                 + r"|png|tiff?|mid|mp2|mp3|mp4"
@@ -264,7 +192,7 @@ def is_valid(url):
                 + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower()):
             return False
 
-        # Avoid calendar/event traps (common infinite trap)
+        # Avoid calendar traps
         lower_path = parsed.path.lower()
         lower_query = parsed.query.lower()
 
@@ -272,62 +200,60 @@ def is_valid(url):
         if 'redirect_to' in lower_query:
             return False
 
-        # Avoid wics.ics.uci.edu URLs with ?share in query params
+        # Avoid wics.ics.uci.edu urls with ?share in query params
         if 'wics.ics.uci.edu' in netloc and 'share' in lower_query:
             return False
 
-        # Avoid ngs.ics.uci.edu URLs with specific paths
+        # Avoid ngs.ics.uci.edu urls with specific paths
         if 'ngs.ics.uci.edu' in netloc:
             if '/category' in lower_path or '/author' in lower_path or '/tag' in lower_path:
                 return False
 
-        # Block all event and calendar URLs entirely (they create infinite pagination traps)
+        # Block all events
         if re.search(r'/(calendar|events?)(/|$)', lower_path):
             return False
 
-        # Block date-based calendar/event URLs (e.g., /events/2024-06-02, /events/week/2025-06-01, /events/month/2025-05)
+        # Block date-based events urls /events/2024-06-02
         if re.search(r'/(calendar|events?)/(week|month|day|\d{4})', lower_path):
             return False
 
-        # Block event tag/category/list pages (e.g., /events/tag/talk/list/)
+        # Block event tag/category/list pages /events/
         if re.search(r'/events?/(tag|category|list)', lower_path):
             return False
 
-        # Block iCal feeds and event display queries (e.g., ?ical=1&eventDisplay=past)
+        # Block iCal feeds and event display queries ?ical=1&eventDisplay=past
         if '/events' in lower_path and ('ical=' in lower_query or 'eventdisplay=' in lower_query):
             return False
 
-        # Block recurring event pagination (e.g., ?page=, ?tribe_paged=)
+        # Block recurring event pagination ?page=, ?tribe_paged=
         if '/events' in lower_path and ('page=' in lower_query or 'tribe' in lower_query):
             return False
 
-        # Avoid gallery/image view traps with excessive parameters
+        # Avoid image view traps with tons of parameters
         if '?' in url and len(url) > 200:
             return False
 
-        # Avoid URLs with too many path segments (potential trap)
+        # Avoid URLs with too many path segments
         if len(parsed.path.split('/')) > 15:
             return False
 
-        # Block wiki traps (DokuWiki, MediaWiki revision/diff/history pages)
-        # DokuWiki: Block ALL action URLs (do=anything) to avoid edit/export/login/diff/revision traps
+        # Avoiding wiki division traps here
         if 'doku.php' in lower_path:
-            # Block any ?do= parameter (edit, export, diff, login, etc.) - only allow normal page views
+            # Block any ?do= param, only allowing normal page views
             if 'do=' in lower_query or 'rev=' in lower_query or 'rev2' in lower_query or 'sectok=' in lower_query:
                 return False
 
-        # MediaWiki: index.php?action=/Special: pages with oldid/diff parameters
+        # pages with oldid/diff parameters in the wiki
         if ('index.php' in lower_path or '/wiki/' in lower_path) and lower_query:
             mw_actions = ['action=', 'oldid=', 'diff=', 'curid=', 'printable=']
             if any(action in lower_query for action in mw_actions):
                 return False
 
-        # Block wiki Special: namespace pages (user lists, recent changes, etc.)
+        # Block wiki pages
         if re.search(r'/(special|especial):', lower_path):
             return False
 
-        # Block common GitLab / repository endpoints to avoid crawl traps
-        # Examples: /-/tree/, /-/blob/, /-/raw/, /-/commit/, /-/merge_requests/, /.git, /commit/
+        # Blocking some common GitLab and repository endpoints to avoid crawl traps
         gitlab_patterns = [
             '/-/',
             '/-/tree/',
@@ -354,3 +280,4 @@ def is_valid(url):
     except TypeError:
         print("TypeError for ", parsed)
         raise
+
